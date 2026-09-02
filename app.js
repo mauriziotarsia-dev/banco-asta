@@ -736,6 +736,8 @@ const formattaAttesa = (sec) => {
   return `circa ${Math.round(min)} minuti`;
 };
 
+const VERSIONE = "8 — proxy dalle impostazioni, export Excel, asta per reparti";
+
 const VELOCE_DEFAULT = "claude-sonnet-5";
 const PROFONDO_DEFAULT = "claude-opus-5";
 
@@ -2153,6 +2155,10 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
 
           <div className="pt-3 text-xs" style={{ color: C.li }}>
             {RUOLI.map((r) => `${r} ${io.rosa[r].length}/${SLOT[r]}`).join("   ")}
+          </div>
+          <div className="text-xs" style={{ color: C.li }}>
+            Versione {VERSIONE}
+            {USA_PROXY && (PROXY ? " · proxy impostato" : " · proxy da impostare")}
           </div>
         </div>
       )}

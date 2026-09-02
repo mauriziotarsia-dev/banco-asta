@@ -1,7 +1,9 @@
-/* Cache dei file dell'app: dopo la prima apertura funziona senza rete.
-   Il motore dei prezzi e' tutto locale, quindi offline gli ordini escono
-   lo stesso. Solo le funzioni AI hanno bisogno della connessione. */
-const CACHE = "banco-v1";
+/* Cache offline.
+   ATTENZIONE al criterio: app.js e index.html vanno presi PRIMA dalla rete
+   e solo in mancanza dalla cache, altrimenti dopo un aggiornamento su GitHub
+   continueresti a vedere la versione vecchia per sempre.
+   Le librerie da CDN invece sono immutabili: quelle prima dalla cache. */
+const CACHE = "banco-v2";
 const FILE = ["./", "./index.html", "./app.js", "./manifest.webmanifest",
   "./icona-192.png", "./icona-512.png", "./icona-180.png",
   "https://cdn.tailwindcss.com",
@@ -19,13 +21,29 @@ self.addEventListener("activate", (e) => {
     Promise.all(k.filter((x) => x !== CACHE).map((x) => caches.delete(x)))).then(() => self.clients.claim()));
 });
 
+const mio = (url) => new URL(url).origin === self.location.origin;
+
 self.addEventListener("fetch", (e) => {
-  if (e.request.method !== "GET") return;              // le chiamate al proxy passano dirette
+  if (e.request.method !== "GET") return;   // le chiamate al proxy passano dirette
+
+  // roba mia: prima la rete, cosi' gli aggiornamenti arrivano subito
+  if (mio(e.request.url)) {
+    e.respondWith(
+      fetch(e.request).then((res) => {
+        const copia = res.clone();
+        caches.open(CACHE).then((c) => c.put(e.request, copia).catch(() => {}));
+        return res;
+      }).catch(() => caches.match(e.request))   // senza rete, la copia in cache
+    );
+    return;
+  }
+
+  // librerie esterne: non cambiano mai, prima la cache
   e.respondWith(
     caches.match(e.request).then((hit) => hit || fetch(e.request).then((res) => {
       const copia = res.clone();
       caches.open(CACHE).then((c) => c.put(e.request, copia).catch(() => {}));
       return res;
-    }).catch(() => hit))
+    }))
   );
 });
