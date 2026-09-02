@@ -739,17 +739,29 @@ const formattaAttesa = (sec) => {
 const VELOCE_DEFAULT = "claude-sonnet-5";
 const PROFONDO_DEFAULT = "claude-opus-5";
 
-/* Indirizzo del proxy che custodisce la chiave API. Vuoto = niente funzioni
-   AI, ma il motore locale (che produce il numero grande) funziona lo stesso. */
-const PROXY = localStorage.getItem("banco-proxy") || "";
+/* Indirizzo del proxy che custodisce la chiave API. Si imposta dalle
+   impostazioni dell'app: cosi' funziona anche sul telefono, senza console. */
+let PROXY = (() => { try { return localStorage.getItem("banco-proxy") || ""; } catch (e) { return ""; } })();
+const USA_PROXY = true;
+
+const impostaProxy = (url) => {
+  PROXY = (url || "").trim().replace(/\/+$/, "");
+  try { localStorage.setItem("banco-proxy", PROXY); } catch (e) {}
+  return PROXY;
+};
+
+const endpoint = () => (USA_PROXY ? PROXY : "https://api.anthropic.com/v1/messages");
 
 async function unaChiamata(modello, prompt, conRicerca) {
+  if (USA_PROXY && !PROXY) throw new Error("proxy non impostato");
   const body = { model: modello, max_tokens: 1000, messages: [{ role: "user", content: prompt }] };
   if (conRicerca) body.tools = [{ type: "web_search_20250305", name: "web_search" }];
-  if (!PROXY) throw new Error("proxy non configurato");
-  const r = await fetch(PROXY, {
+  const r = await fetch(endpoint(), {
     method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
   });
+  if (r.status === 403) throw new Error("403: il dominio nel worker non combacia, oppure non hai ridistribuito dopo la modifica");
+  if (r.status === 401) throw new Error("401: la chiave manca o il Secret non si chiama ANTHROPIC_API_KEY");
+  if (r.status === 404) throw new Error("404: indirizzo del proxy sbagliato");
   const d = await r.json();
   if (d.error) throw new Error(d.error.message || "modello non disponibile");
   const t = (d.content || []).filter((b) => b.type === "text").map((b) => b.text).join("\n").trim();
@@ -1668,6 +1680,22 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
      ══════════════════════════════════════════════════════════════════ */
 
   const [esito, setEsito] = useState("");
+  const [proxyTesto, setProxyTesto] = useState(PROXY);
+  const [provaInCorso, setProvaInCorso] = useState(false);
+
+  // Salva l'indirizzo e fa subito una chiamata minima per vedere se risponde:
+  // meglio scoprirlo adesso che stasera con l'asta partita.
+  async function provaProxy() {
+    setProvaInCorso(true);
+    impostaProxy(proxyTesto);
+    try {
+      const t = await unaChiamata(veloce, "Rispondi solo con la parola: pronto", false);
+      mostra(t.toLowerCase().includes("pronto") ? "Proxy collegato, funzioni AI accese." : "Risponde, ma in modo strano: " + t.slice(0, 60));
+    } catch (e) {
+      mostra("Non funziona. " + e.message);
+    }
+    setProvaInCorso(false);
+  }
   const mostra = (t) => { setEsito(t); setTimeout(() => setEsito(""), 4000); };
 
   async function esportaCSV() {
