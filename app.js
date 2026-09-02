@@ -736,7 +736,7 @@ const formattaAttesa = (sec) => {
   return `circa ${Math.round(min)} minuti`;
 };
 
-const VERSIONE = "8 — proxy dalle impostazioni, export Excel, asta per reparti";
+const VERSIONE = "11 — esca coerente fra le due schermate";
 
 const VELOCE_DEFAULT = "claude-sonnet-5";
 const PROFONDO_DEFAULT = "claude-opus-5";
@@ -785,6 +785,16 @@ async function chiediAgente(prompt, conRicerca, modello = VELOCE_DEFAULT, onDura
     } catch (e) { ultimo = e; }
   }
   throw ultimo || new Error("nessun modello disponibile");
+}
+
+/* I modelli ogni tanto incorniciano il JSON con una frase di cortesia.
+   Invece di arrendermi ritaglio dal primo graffa all'ultima. */
+function leggiJSON(t) {
+  const pulito = t.replace(/```json|```/g, "").trim();
+  try { return JSON.parse(pulito); } catch (e) {}
+  const a = pulito.indexOf("{"), b = pulito.lastIndexOf("}");
+  if (a >= 0 && b > a) return JSON.parse(pulito.slice(a, b + 1));
+  throw new Error("JSON non leggibile");
 }
 
 const CONTESTO = `Lega Classic a ${REGOLE.squadre} squadre, ${REGOLE.crediti} crediti a testa, rosa ${REGOLE.slot.P} portieri ${REGOLE.slot.D} difensori ${REGOLE.slot.C} centrocampisti ${REGOLE.slot.A} attaccanti, asta a chiamata libera, in campo minimo ${REGOLE.minDif} difensori e massimo ${REGOLE.maxAtt} attaccanti.${REGOLE.modDifesa ? " Modificatore di difesa ATTIVO: portiere e difensori valgono molto di piu' del solito." : ""}${REGOLE.assist ? "" : " Niente bonus assist."} Si comprano ${REGOLE.squadre * 25} giocatori su ~580: la fascia bassa vale 1-2 crediti. Il proprietario tifa Roma.
@@ -1043,12 +1053,12 @@ function inflazione(venduti) {
   return { k: Math.max(0.6, Math.min(1.8, mediana)), n: ultimi.length };
 }
 
-const nuovaSquadra = (nome, tifo = "") => ({ nome, tifo, crediti: 1000, rosa: { P: [], D: [], C: [], A: [] } });
+const nuovaSquadra = (nome, tifo = "", persona = "") => ({ nome, tifo, persona, crediti: 1000, rosa: { P: [], D: [], C: [], A: [] } });
 function generaSquadre(n, crediti, vecchie) {
   return Array.from({ length: n }, (_, i) => {
     const v = vecchie && vecchie[i];
     const [nome, tifo] = REGOLE.sedie[i] || [`Squadra ${i + 1}`, ""];
-    return { ...nuovaSquadra(v ? v.nome : nome, v ? v.tifo : tifo), crediti };
+    return { ...nuovaSquadra(v ? v.nome : nome, v ? v.tifo : tifo, v ? v.persona : ""), crediti };
   });
 }
 
@@ -1114,9 +1124,9 @@ function tabelle(stato, regole) {
     for (const r of RUOLI)
       for (const g of s.rosa[r]) rose.push([s.nome, r, g.nome, g.sq, g.prezzo]);
 
-  const riepilogo = [["Squadra", "Tifa", "Crediti residui", "Spesi", "Portieri", "Difensori", "Centrocampisti", "Attaccanti", "Totale"]];
+  const riepilogo = [["Squadra", "Allenatore", "Tifa", "Crediti residui", "Spesi", "Portieri", "Difensori", "Centrocampisti", "Attaccanti", "Totale"]];
   for (const s of squadre)
-    riepilogo.push([s.nome, s.tifo || "", s.crediti, regole.crediti - s.crediti,
+    riepilogo.push([s.nome, s.persona || "", s.tifo || "", s.crediti, regole.crediti - s.crediti,
       `${s.rosa.P.length}/${SLOT.P}`, `${s.rosa.D.length}/${SLOT.D}`,
       `${s.rosa.C.length}/${SLOT.C}`, `${s.rosa.A.length}/${SLOT.A}`,
       RUOLI.reduce((a, r) => a + s.rosa[r].length, 0)]);
@@ -1132,6 +1142,9 @@ function testoCSV(stato, regole) {
   const blocco = (titolo, righe) => `${titolo}\n` + righe.map((r) => r.map(csvCella).join(";")).join("\n");
   return [blocco("ROSE", t.rose), blocco("RIEPILOGO", t.riepilogo), blocco("CRONOLOGIA", t.cronologia)].join("\n\n");
 }
+
+const chiSei = (s) => (s.persona ? s.persona : s.nome);
+const etichetta = (s) => (s.persona && s.persona !== s.nome ? `${s.nome} (${s.persona})` : s.nome);
 
 const oraFile = () => new Date().toISOString().slice(0, 16).replace("T", "-").replace(":", "");
 
@@ -1200,6 +1213,7 @@ function Proiezione({ stato, regole, chiudi }) {
             <div key={i} style={{ background: C.bg, padding: "14px 16px" }}>
               <div className="flex items-baseline gap-2 mb-1">
                 <span className="text-xl font-bold truncate" style={{ color: i === 0 ? C.gi : C.tx }}>{s2.nome}</span>
+                {s2.persona && <span className="text-sm truncate" style={{ color: C.mu }}>{s2.persona}</span>}
                 {s2.tifo && <span className="text-xs" style={{ color: COL_RUOLO.A }}>{s2.tifo}</span>}
                 <span className="ml-auto text-3xl font-bold" style={{ color: i === 0 ? C.gi : C.tx }}>{s2.crediti}</span>
               </div>
@@ -1241,6 +1255,7 @@ const SOLO_PROIEZIONE = typeof location !== "undefined" && /vista=proiezione/.te
 function BancoAsta() {
   const [stato, setStato] = useState(statoIniziale);
   const [proietta, setProietta] = useState(false);
+  const [esca, setEsca] = useState(null);   // nome chiamato solo per far spendere gli altri
   const [fase, setFase] = useState("attesa");
   const [sul, setSul] = useState(null);
   const [q, setQ] = useState("");
@@ -1368,11 +1383,20 @@ function BancoAsta() {
   // Chiamarli presto costa zero a te e brucia i crediti a chi tifa per loro.
   const esche = useMemo(() => {
     const sigle = [...new Set(squadre.slice(1).map((s) => s.tifo).filter((t) => t && t !== "ROM"))];
+    const r = REGOLE.perReparto ? fase2 : null;
+    if (r) {
+      /* Il confronto giusto non e' con i miei slot ma con quelli di TUTTO il
+         tavolo: se restano 20 portieri titolari per 18 posti, buttarne uno in
+         pasto agli altri significa restare senza. L'esca ha senso solo dove
+         c'e' abbondanza vera. */
+      const disponibili = liberi.filter((g) => g.ruolo === r && g.tit && !g.fuori).length;
+      const domanda = squadre.reduce((a, s2) => a + (SLOT[r] - s2.rosa[r].length), 0);
+      if (disponibili < domanda + 5) return [];
+    }
     return liberi
-      .filter((g) => sigle.includes(g.sq) && !g.fuori
-        && (!REGOLE.perReparto || !fase2 || g.ruolo === fase2)
-        && SLOT[g.ruolo] - io.rosa[g.ruolo].length <= 3)
+      .filter((g) => sigle.includes(g.sq) && !g.fuori && (!r || g.ruolo === r))
       .map((g) => ({ g, atteso: consiglia(g, squadre, 0, opzL, venduti).atteso }))
+      .filter((x) => x.atteso >= 25)          // sotto questa soglia non gli fai male
       .sort((a, b) => b.atteso - a.atteso)
       .slice(0, 3);
   }, [liberi, squadre, opzL, venduti, io, fase2]);
@@ -1381,6 +1405,8 @@ function BancoAsta() {
 
   const ordine = useMemo(() => {
     if (!sul || !cons) return null;
+    if (esca && esca === sul.nome)
+      return { azione: "passa", motivo: "l'hai chiamato tu per far spendere gli altri: non rilanciare" };
     if (REGOLE.perReparto && fase2 && sul.ruolo !== fase2)
       return { azione: "passa", motivo: `si sta facendo il reparto ${RUOLO_NOME[fase2]}` };
     const p = piano[sul.ruolo];
@@ -1410,7 +1436,7 @@ challenge: sul.sq === "ROM" ? romanista : null,
     const tettoReparto = Math.max(1, p.budget - (caro ? Math.round(p.budget * 0.2) : 0));
     return { azione: "offri", tetto: tettoVero(Math.min(cons.max, tettoReparto)), atteso: cons.atteso, caro,
       motivo: caro ? "gonfiato dal tifo: fermati presto" : "non e' un obiettivo, ma se resta in budget prendilo" };
-  }, [sul, cons, piano, legale, romanista, io, riserva, vuoti, tettoAI, fase2]);
+  }, [sul, cons, piano, legale, romanista, io, riserva, vuoti, tettoAI, fase2, esca]);
 
   const chiamata = useMemo(() => {
     const daFare = REGOLE.perReparto && fase2 ? [fase2] : RUOLI;
@@ -1497,8 +1523,46 @@ challenge: sul.sq === "ROM" ? romanista : null,
     const nuoveSquadre = squadre.map((x, i) => i === sqIdx
       ? { ...x, crediti: x.crediti - p, rosa: { ...x.rosa, [sul.ruolo]: [...x.rosa[sul.ruolo], { ...sul, prezzo: p }] } } : x);
     const nuoviVenduti = [...venduti, { gid: sul.id, nome: sul.nome, sq: sul.sq, ruolo: sul.ruolo, prezzo: p, a: sqIdx, previsto: cons ? cons.atteso : 0 }];
-    setSul(null); setPrezzo(""); setQ(""); setFase("attesa"); setAgente({ attesa: false, testo: "", titolo: "" });
+    setSul(null); setPrezzo(""); setQ(""); setEsca(null); setFase("attesa"); setAgente({ attesa: false, testo: "", titolo: "" });
     if (aiAcceso) rivaluta(nuoviVenduti, nuoveSquadre);
+  }
+
+  /* Flessibilita' sugli acquisti gia' registrati: cancellare uno qualsiasi
+     restituendo i crediti, o correggerne prezzo e acquirente. All'asta si
+     sbaglia a digitare, e accorgersene dieci lotti dopo non deve essere
+     un problema. */
+  function rimuovi(gid) {
+    const v = venduti.find((x) => x.gid === gid);
+    if (!v) return;
+    setStato((st) => ({
+      ...st,
+      squadre: st.squadre.map((x, i) => i === v.a
+        ? { ...x, crediti: x.crediti + v.prezzo, rosa: { ...x.rosa, [v.ruolo]: x.rosa[v.ruolo].filter((g) => g.id !== v.gid) } }
+        : x),
+      venduti: st.venduti.filter((x) => x.gid !== gid),
+    }));
+    mostra(`${v.nome} rimosso, ${v.prezzo} crediti restituiti a ${chiSei(squadre[v.a])}.`);
+  }
+
+  function correggi(gid, nuovoPrezzo, nuovoA) {
+    const v = venduti.find((x) => x.gid === gid);
+    if (!v) return;
+    const p = Math.max(1, parseInt(nuovoPrezzo, 10) || v.prezzo);
+    const a = nuovoA ?? v.a;
+    const dest = squadre[a];
+    if (a !== v.a && SLOT[v.ruolo] - dest.rosa[v.ruolo].length <= 0) { mostra("Quel reparto e' pieno."); return; }
+    const giocatore = squadre[v.a].rosa[v.ruolo].find((g) => g.id === v.gid);
+    setStato((st) => {
+      const sq = st.squadre.map((x, i) => {
+        let y = x;
+        if (i === v.a) y = { ...y, crediti: y.crediti + v.prezzo, rosa: { ...y.rosa, [v.ruolo]: y.rosa[v.ruolo].filter((g) => g.id !== v.gid) } };
+        if (i === a) y = { ...y, crediti: y.crediti - p, rosa: { ...y.rosa, [v.ruolo]: [...y.rosa[v.ruolo].filter((g) => g.id !== v.gid), { ...giocatore, prezzo: p }] } };
+        return y;
+      });
+      return { ...st, squadre: sq, venduti: st.venduti.map((x) => (x.gid === gid ? { ...x, prezzo: p, a } : x)) };
+    });
+    setModifica(null);
+    mostra(`${v.nome}: ${p} crediti a ${chiSei(squadre[a])}.`);
   }
 
   function annulla() {
@@ -1535,7 +1599,7 @@ Per ognuno, stagione 2025-26 e stagione 2024-25: presenze, media voto, fantamedi
 Metti 0 se in quella stagione non ha giocato in Serie A (arrivato dall'estero, Serie B, primavera).
 Rispondi SOLO con JSON, una chiave per calciatore col nome ESATTO che ti ho dato:
 {"Nome":[pres2526,mv2526,fm2526,gol2526,ass2526,pres2425,mv2425,fm2425,gol2425,ass2425]}`, true, veloce, segnaDurata);
-        const j = JSON.parse(t.replace(/```json|```/g, "").trim());
+        const j = leggiJSON(t);
         for (const [k, v] of Object.entries(j))
           if (Array.isArray(v) && v.length === 10) STORICO_LIVE[k] = v.map((x) => +x || 0);
       } catch (e) {
@@ -1563,7 +1627,7 @@ Rispondi SOLO con JSON, una chiave per calciatore col nome ESATTO che ti ho dato
           `${CONTESTO}
 
 Cerca sul web la situazione aggiornata di questi giocatori di Serie A 2026/27: ${blocco.map((g) => `${g.nome} (${g.sq})`).join(", ")}.\nPer ognuno: squadra attuale dopo il mercato chiuso l'1 settembre, se e' titolare, infortuni o squalifiche, come sono andate le prime due giornate.\nRispondi SOLO con JSON, una chiave per giocatore col nome esatto che ti ho dato, valore una frase sola di massimo 15 parole:\n{"Nome":"frase"}`, true, veloce, segnaDurata);
-        Object.assign(nuovi, JSON.parse(t.replace(/```json|```/g, "").trim()));
+        Object.assign(nuovi, leggiJSON(t));
       } catch (e) {
         blocco.forEach((g) => { nuovi[g.nome] = "Non verificato: controlla a mano."; });
       }
@@ -1579,7 +1643,7 @@ Cerca sul web la situazione aggiornata di questi giocatori di Serie A 2026/27: $
       const t = await chiediAgente(`${CONTESTO}
 
 Nel listone manca "${nome}". Cerca sul web chi e' in Serie A 2026/27.\nSolo JSON: {"nome":"","sq":"sigla 3 lettere","ruolo":"P|D|C|A","fvm":numero scala 1000,"tit":true|false,"nota":"una riga"}`, true, veloce, segnaDurata);
-      const j = JSON.parse(t.replace(/```json|```/g, "").trim());
+      const j = leggiJSON(t);
       const g = { id: 10000 + extra.length, nome: j.nome || nome, sq: j.sq || "???", ruolo: RUOLI.includes(j.ruolo) ? j.ruolo : "C", fvm: Math.max(1, +j.fvm || 5), tit: !!j.tit, bon: 0, rig: 0, trend: 0, sch: 0, fuori: false };
       setExtra((v) => [...v, g]); setSul(g); setQ(""); setFase("inAsta");
       setStato((v) => ({ ...v, dossier: { ...v.dossier, [g.nome]: j.nota || "" } }));
@@ -1611,7 +1675,7 @@ Dammi fino a 20 tetti invece di 12, includendo anche giocatori che nessuno ha an
           : base,
         false, aFondo ? profondo : veloce, segnaDurata);
       if (mio !== richiesta.current) return;   // arrivata tardi, ne e' partita un'altra
-      const j = JSON.parse(t.replace(/```json|```/g, "").trim());
+      const j = leggiJSON(t);
       const tetti = {};
       (j.tetti || []).forEach((x) => { if (x && x.nome) tetti[x.nome.trim().toLowerCase()] = { max: Math.max(1, Math.round(+x.max || 1)), perche: x.perche || "" }; });
       setAi({ tetti, lettura: j.lettura || "", chiamare: j.chiamare || null,
@@ -1619,7 +1683,12 @@ Dammi fino a 20 tetti invece di 12, includendo anche giocatori che nessuno ha an
         a: vendutiOra.length, attesa: false, aFondo: false, profonda: aFondo, errore: "" });
     } catch (e) {
       if (mio !== richiesta.current) return;
-      setAi((v) => ({ ...v, attesa: false, errore: "L'AI non ha risposto. Vado coi numeri calcolati in locale." }));
+      const causa = /JSON|Unexpected|token/i.test(e.message || "")
+        ? "ha risposto in un formato che non riesco a leggere"
+        : /429|rate/i.test(e.message || "") ? "troppe richieste ravvicinate, aspetta qualche secondo"
+        : /403|401|404/.test(e.message || "") ? e.message
+        : (e.message || "non ha risposto");
+      setAi((v) => ({ ...v, attesa: false, errore: `AI: ${causa}. I numeri restano quelli locali.` }));
     }
   }
 
@@ -1645,7 +1714,7 @@ Dammi fino a 20 tetti invece di 12, includendo anche giocatori che nessuno ha an
     try {
       const t = await chiediAgente(
         `Cerca sul web le statistiche di Serie A di ${g.nome} (${g.sq}).\nRispondi SOLO con JSON, niente altro:\n{"pres2526":n,"mv2526":n,"fm2526":n,"gol2526":n,"ass2526":n,"pres2425":n,"mv2425":n,"fm2425":n,"gol2425":n,"ass2425":n}\nMetti 0 dove non ha giocato in Serie A. La fantamedia e' media voto piu' bonus e malus.`, true, veloce, segnaDurata);
-      const j = JSON.parse(t.replace(/```json|```/g, "").trim());
+      const j = leggiJSON(t);
       STORICO_LIVE[g.nome] = [j.pres2526, j.mv2526, j.fm2526, j.gol2526, j.ass2526,
         j.pres2425, j.mv2425, j.fm2425, j.gol2425, j.ass2425].map((x) => +x || 0);
       setStato((v) => ({ ...v, stat: { ...STORICO_LIVE } }));
@@ -1683,6 +1752,8 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
 
   const [esito, setEsito] = useState("");
   const [proxyTesto, setProxyTesto] = useState(PROXY);
+  const [modifica, setModifica] = useState(null);
+  const [modPrezzo, setModPrezzo] = useState("");
   const [provaInCorso, setProvaInCorso] = useState(false);
 
   // Salva l'indirizzo e fa subito una chiamata minima per vedere se risponde:
@@ -1834,6 +1905,13 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
               <Btn forte onClick={() => setFase("mioTurno")}>Tocca a me</Btn>
             </div>
           )}
+          {aiAcceso && ai.errore && !ai.attesa && (
+            <button onClick={() => rivaluta(venduti, squadre, false)}
+              className="w-full rounded mt-3" style={{ padding: "14px", fontSize: 15,
+                background: "transparent", color: C.ro, border: `1px solid ${C.ro}` }}>
+              Riprova a collegare l'AI
+            </button>
+          )}
           {vuoti > 0 && aiAcceso && (() => {
             const nome = MODELLI.find((m) => m.id === profondo)?.n || "il modello lento";
             const stima = stimaSecondi(profondo, false, misure);
@@ -1975,12 +2053,12 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
                     className="rounded truncate px-2 font-medium"
                     style={{ padding: "20px 8px", fontSize: 16, background: i === 0 ? C.gi : C.su,
                       color: i === 0 ? C.bg : C.tx, border: `1px solid ${C.li}`, opacity: pieno || !prezzo ? 0.3 : 1 }}>
-                    {i === 0 ? "L'ho preso io" : s2.nome}
+                    {i === 0 ? "L'ho preso io" : chiSei(s2)}
                   </button>
                 );
               })}
             </div>
-            <button onClick={() => { setSul(null); setFase("attesa"); setPrezzo(""); }}
+            <button onClick={() => { setSul(null); setFase("attesa"); setPrezzo(""); setEsca(null); }}
               className="w-full py-4 text-sm" style={{ color: C.mu }}>Nome sbagliato, torna indietro</button>
           </div>
         </div>
@@ -2003,6 +2081,7 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
               <div className="space-y-3 mt-6">
                 <Btn forte onClick={() => {
                   const g = ordineTurno.g || [...LISTONE, ...extra].find((x) => x.nome.toLowerCase() === ordineTurno.nome.toLowerCase());
+                  setEsca(ordineTurno.tipo === "esca" ? ordineTurno.nome : null);
                   if (g) { setSul(g); setFase("inAsta"); } else { setQ(ordineTurno.nome); setFase("cerca"); }
                 }}>Fatto</Btn>
                 <Btn onClick={() => setFase("attesa")}>Indietro</Btn>
@@ -2033,14 +2112,47 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
               </div>
               {io.rosa[r].length === 0 && <div className="text-sm pl-8" style={{ color: C.li }}>—</div>}
               {io.rosa[r].map((g) => (
-                <div key={g.id} className="flex items-center gap-2 pl-8 py-1">
+                <button key={g.id} onClick={() => { setModifica(g.id); setModPrezzo(String(g.prezzo)); }}
+                  className="w-full flex items-center gap-2 pl-8 py-2 text-left" style={{ color: C.tx }}>
                   <span className="flex-1 truncate">{g.nome}</span>
                   <span className="text-xs" style={{ color: C.mu }}>{g.sq}</span>
                   <span className="font-semibold w-10 text-right" style={{ color: C.gi }}>{g.prezzo}</span>
-                </div>
+                  <span className="text-xs w-5 text-right" style={{ color: C.li }}>modifica</span>
+                </button>
               ))}
             </div>
           ))}
+
+          {modifica !== null && (() => {
+            const v = venduti.find((x) => x.gid === modifica);
+            if (!v) return null;
+            return (
+              <div className="mx-5 my-4 p-4 rounded" style={{ background: C.su, border: `1px solid ${C.gi}` }}>
+                <div className="flex items-baseline gap-2 mb-3">
+                  <span className="text-lg font-bold">{v.nome}</span>
+                  <span className="text-sm" style={{ color: C.mu }}>{v.sq} · {v.ruolo}</span>
+                  <button onClick={() => setModifica(null)} className="ml-auto text-xs" style={{ color: C.mu }}>chiudi</button>
+                </div>
+                <div className="text-sm mb-1" style={{ color: C.mu }}>Prezzo</div>
+                <input value={modPrezzo} onChange={(e) => setModPrezzo(e.target.value.replace(/\D/g, ""))} inputMode="numeric"
+                  className="w-full px-3 py-3 rounded text-lg outline-none mb-3"
+                  style={{ background: C.bg, color: C.tx, border: `1px solid ${C.li}` }} />
+                <div className="text-sm mb-1" style={{ color: C.mu }}>Comprato da</div>
+                <div className="grid grid-cols-2 gap-2 mb-3">
+                  {squadre.map((s2, i) => (
+                    <button key={i} onClick={() => correggi(v.gid, modPrezzo, i)} className="py-3 rounded text-sm truncate px-2"
+                      style={{ background: i === v.a ? C.gi : C.bg, color: i === v.a ? C.bg : C.tx, border: `1px solid ${C.li}` }}>
+                      {chiSei(s2)}
+                    </button>
+                  ))}
+                </div>
+                <button onClick={() => { rimuovi(v.gid); setModifica(null); }}
+                  className="w-full py-3 rounded text-sm" style={{ background: "transparent", color: C.ro, border: `1px solid ${C.ro}` }}>
+                  Cancella l'acquisto e ridai i {v.prezzo} crediti
+                </button>
+              </div>
+            );
+          })()}
 
           <div className="px-5 pt-6 pb-2 text-sm" style={{ color: C.mu }}>Gli altri</div>
           {squadre.slice(1).map((s2, i) => {
@@ -2049,6 +2161,7 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
               <div key={i} className="px-5 py-3 border-b" style={{ borderColor: C.li }}>
                 <div className="flex items-baseline gap-2">
                   <span className="font-semibold text-lg">{s2.nome}</span>
+                  {s2.persona && <span className="text-sm" style={{ color: C.mu }}>{s2.persona}</span>}
                   {s2.tifo && <span className="text-xs" style={{ color: COL_RUOLO.A }}>{s2.tifo}</span>}
                   <span className="ml-auto text-xl font-bold">{s2.crediti}</span>
                   <span className="text-xs w-14 text-right" style={{ color: C.mu }}>max {offertaMassimaLegale(s2)}</span>
@@ -2065,9 +2178,10 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
                 {tutti2.length > 0 && (
                   <div className="text-sm leading-relaxed" style={{ color: C.mu }}>
                     {tutti2.map((g) => (
-                      <span key={g.id} className="inline-block mr-2">
+                      <button key={g.id} onClick={() => { setModifica(g.id); setModPrezzo(String(g.prezzo)); }}
+                        className="inline-block mr-2" style={{ color: C.mu }}>
                         <span style={{ color: COL_RUOLO[g.r] }}>{g.r}</span> {g.nome} <span style={{ color: C.tx }}>{g.prezzo}</span>
-                      </span>
+                      </button>
                     ))}
                   </div>
                 )}
@@ -2088,12 +2202,23 @@ ${riassuntoStato(squadre, io, liberi)}\n\nIn massimo cinque righe: sbaglio l'all
       {/* ─────────── IMPOSTAZIONI, fuori dai piedi ─────────── */}
       {dettagli && fase === "attesa" && (
         <div className="border-t px-5 py-5 space-y-4" style={{ borderColor: C.li }}>
+          <div className="text-sm" style={{ color: C.gi }}>Chi c'e' al tavolo</div>
+          <div className="flex gap-2 text-xs pb-1" style={{ color: C.mu }}>
+            <span className="flex-1">fantasquadra</span><span className="flex-1">persona</span>
+            <span className="w-12">tifa</span><span className="w-12 text-right">crediti</span>
+          </div>
           {squadre.map((s2, i) => (
             <div key={i} className="flex items-center gap-2">
-              <input value={s2.nome} onChange={(e) => setStato((v) => ({ ...v, squadre: v.squadre.map((x, j) => (j === i ? { ...x, nome: e.target.value } : x)) }))}
-                className="flex-1 bg-transparent outline-none text-sm min-w-0" style={{ color: i === 0 ? C.gi : C.tx }} />
+              <input value={s2.nome} placeholder="squadra"
+                onChange={(e) => setStato((v) => ({ ...v, squadre: v.squadre.map((x, j) => (j === i ? { ...x, nome: e.target.value } : x)) }))}
+                className="flex-1 min-w-0 px-2 py-2 rounded text-sm outline-none"
+                style={{ background: C.bg, color: i === 0 ? C.gi : C.tx, border: `1px solid ${C.li}` }} />
+              <input value={s2.persona || ""} placeholder="chi e'"
+                onChange={(e) => setStato((v) => ({ ...v, squadre: v.squadre.map((x, j) => (j === i ? { ...x, persona: e.target.value } : x)) }))}
+                className="flex-1 min-w-0 px-2 py-2 rounded text-sm outline-none"
+                style={{ background: C.bg, color: C.tx, border: `1px solid ${C.li}` }} />
               <select value={s2.tifo || ""} onChange={(e) => setStato((v) => ({ ...v, squadre: v.squadre.map((x, j) => (j === i ? { ...x, tifo: e.target.value } : x)) }))}
-                className="text-xs rounded px-1 py-1 outline-none" style={{ background: C.bg, color: C.mu, border: `1px solid ${C.li}` }}>
+                className="text-xs rounded px-1 py-2 outline-none w-12" style={{ background: C.bg, color: C.mu, border: `1px solid ${C.li}` }}>
                 {TIFI.map((t) => <option key={t.k} value={t.k} style={{ background: C.bg }}>{t.k || "—"}</option>)}
               </select>
               <span className="text-sm font-semibold w-12 text-right">{s2.crediti}</span>
